@@ -141,18 +141,18 @@ def get_table_metadata(env, db_name, tbl_name,columns = [], auth_dict=auth_dict,
         conn = odbc.connect('DRIVER={Teradata};VERSION=14.10;'+f"DBCNAME={env_n};DSN={env_dsn};UID={usr};PWD={passw};QUIETMODE=YES",autocommit=True)
 
         df = pd.read_sql(sql,conn)
-        df, dtype_dict = _process_metadata_fexp(df,partition_key=partition_key)
+        df, dtype_dict = _process_metadata_fexp(df, partition_key=partition_key)
         df['ColumnName'].str.lower()
         return(df, dtype_dict)
 
     elif connector == "teradata":
-        udaExec = teradata.UdaExec(appName="Anomaly Detection", version='1.0', odbcLibPath="/opt/teradata/client/15.10/odbc_64/lib/libodbc.so", logConsole=False)
+        udaExec = teradata.UdaExec(appName="Anomaly Detection", version='1.0', odbcLibPath="/Library/Application Support/teradata/client/16.20/lib/tdataodbc_sbu.dylib", logConsole=False)
         print("Connecting to ...")
         session = udaExec.connect(method='odbc', system=env_n, username=usr, password=passw)
         print("Connected!")
 
         df = pd.read_sql(sql, session)
-        df, dtype_dict = _process_metadata_fexp(df,partition_key=partition_key)
+        df, dtype_dict = _process_metadata_fexp(df, partition_key=partition_key)
         df['ColumnName'].str.lower()
         return(df, dtype_dict)
     else:

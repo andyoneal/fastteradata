@@ -28,7 +28,7 @@ def connect_teradata(env, connector):
         raise ValueError("Wrong value error: Need to specify connector as either teradata or pyodbc")
 
 
-def get_unique_partitions(env,db,table,auth_dict=auth_dict,custom_auth=False,connector="teradata",partition_key="", partition_type=""):
+def get_unique_partitions(env, db, table, auth_dict=auth_dict, custom_auth=False, connector="teradata", partition_key="", partition_type="", partition_size=-1):
 
     env_n, env_dsn, env_short, usr, passw = load_db_info(env, custom_auth=custom_auth)
 
@@ -40,8 +40,12 @@ def get_unique_partitions(env,db,table,auth_dict=auth_dict,custom_auth=False,con
         sql = f"SELECT DISTINCT EXTRACT(YEAR FROM {partition_key}) as years, \
                                 EXTRACT(MONTH FROM {partition_key}) as months \
                                 from {db}.{table} order by years, months;"
+    elif partition_type == "rowcount":
+        if partition_size == -1:
+            raise Exception("partition_type set to rowcount, but partition_size not provided.")
+        sql = f"SELECT COUNT(*) from {db}.{table};"
     else:
-        raise Exception("Invalid partition_type: Must either be year or month")
+        raise Exception("Invalid partition_type: Must either be year, month, or rowcount")
 
     conn = connect_teradata(env, connector)
     df = pd.read_sql(sql, conn)
@@ -51,8 +55,11 @@ def get_unique_partitions(env,db,table,auth_dict=auth_dict,custom_auth=False,con
         unique_list = df["yearmonth"].tolist()
     elif partition_type == "year":
         unique_list = df["years"].tolist()
+    elif partition_type == "rowcount":
+        rowcnt == df.iat[0,0]
+        unique_list = np.arange(stop=rowcnt, step=partition_size).tolist()
     else:
-        raise Exception("Invalid partition_type: must be year or month")
+        raise Exception("Invalid partition_type: must be year, month, or rowcount")
 
     return(unique_list)
 
@@ -60,7 +67,7 @@ def get_unique_partitions(env,db,table,auth_dict=auth_dict,custom_auth=False,con
 
 
 def generate_sql_main(export_path, file_name, env_short, usr, passw, db, table, meta_df, columns=[], nrows=-1,
-                      partition_key="", current_partition="", partition_type="", orderby=[], meta_table="", where_clause="",suppress_text=False, distinct=False):
+                      partition_key="", current_partition="", partition_type="", orderby=[], meta_table="", where_clause="", suppress_text=False, distinct=False):
     #print("in generage_sql_main")
     #print(partition_key)
     log_table = db
@@ -135,6 +142,11 @@ def generate_sql_main(export_path, file_name, env_short, usr, passw, db, table, 
             " AND " + "EXTRACT(MONTH FROM " + partition_key + ") = " + str(current_partition.split("D")[1])
         if len(where_clause) > 0:
             where_string += f" AND {where_clause}"
+    elif partition_type == "rowcount":
+        if len(where_clause) > 0:
+            where_string = f"WHERE {where_clause}\n"
+        fields_str = ','.join(col_list)
+        where_string = f"QUALIFY ROW_NUMBER() OVER (ORDER BY {fields_str}) BETWEEN {current_partition[0]} and {current_partition[1]}";
     else:
         if len(where_clause) > 0:
             where_string = f"WHERE {where_clause}"
@@ -174,7 +186,7 @@ def coalesce_statement(var, dtype, end=False):
 
 def parse_sql_single_table(export_path, env, db, table, columns=[], auth_dict=auth_dict,
                            custom_auth=False, nrows=-1,connector="teradata",
-                           partition_key="", partition_type="year", execute=True, primary_keys=[], meta_table="",
+                           partition_key="", partition_type="year", partition_size=100000, execute=True, primary_keys=[], meta_table="",
                            where_clause="", suppress_text=False, distinct=False):
     """
         Summary:
@@ -215,9 +227,15 @@ def parse_sql_single_table(export_path, env, db, table, columns=[], auth_dict=au
     unique_partitions = []
     if partition_key != "" and tot_columns <= MAX_COLS:
         print("Getting Unique Partitions")
-        unique_partitions = get_unique_partitions(env,db,table,auth_dict=auth_dict,custom_auth=custom_auth,connector=connector,partition_key=partition_key, partition_type=partition_type)
+        unique_partitions = get_unique_partitions(env, db, table, auth_dict=auth_dict, custom_auth=custom_auth, connector=connector, partition_key=partition_key, partition_type=partition_type)
         did_partition = True
-    elif partition_key != "" and tot_columns > MAX_COLS:
+    elif partition_type == "rowcount" and tot_columns <= MAX_COLS:
+        if partition_key != "":
+            raise Exception("Partitioning by rowcount does not require a partition_key but one was provided. Depending on which partition_type was intended, partiton_key should be removed or partition_type should be year or month. ")
+        print("Getting Unique Partitions by Splitting Rows into Batches")
+        unique_partitions = get_unique_partitions(env, db, table, auth_dict=auth_dict, custom_auth=custom_auth, connector=connector, partition_type="rowcount", partition_size=partition_size)
+        did_partition = True
+    elif (partition_key != "" or partition_type == "rowcount") and tot_columns > MAX_COLS:
         print("Cannot create vertical partition because horizontal partitioning is required. Creating horizontal partitions instead.")
 
 
@@ -239,6 +257,15 @@ def parse_sql_single_table(export_path, env, db, table, columns=[], auth_dict=au
             #Save fast export file
             script_path = save_file(export_path, _fname, final)
             fast_export_scripts.append(script_path)
+    elif did_partition == True and partition_type == "rowcount" and tot_columns <= MAX_COLS:
+        min_row = 0
+        for max_row in unique_partitions:
+            _fname = file_name + "_" + str(min_row) + "_" + str(max_row) + "_export.txt"
+            final, col_list = generate_sql_main(export_path, _fname, env_short, usr, passw, db, table, meta_df, columns=columns, nrows=nrows, partition_key=partition_key, current_partition=(min_row, max_row-1), partition_type=partition_type, meta_table=meta_table, where_clause=where_clause, suppress_text = suppress_text)
+            #Save fast export file
+            script_path = save_file(export_path, _fname, final)
+            fast_export_scripts.append(script_path)
+            min_row = max_row
     elif tot_columns > MAX_COLS:
         if not isinstance(primary_keys, list):
             raise Exception("'primary_keys' must be a list, even if a single key")

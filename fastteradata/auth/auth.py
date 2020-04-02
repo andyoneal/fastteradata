@@ -16,6 +16,9 @@ def read_credential_file():
 def load_db_info(env, custom_auth=False):
 
     auth, auth_dict, env_dict = read_credential_file()
+    print(auth)
+    print(auth_dict)
+    print(env_dict)
 
     env_n = env_dict[env][0]
     env_dsn = env_dict[env][1]
